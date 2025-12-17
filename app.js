@@ -304,32 +304,57 @@ function displayGPSLocation(exifData) {
             exifData.GPSLongitudeRef
         );
         
-        gpsInfo.push({ label: 'Latitude', value: `${lat.toFixed(6)}° ${exifData.GPSLatitudeRef}` });
-        gpsInfo.push({ label: 'Longitude', value: `${lon.toFixed(6)}° ${exifData.GPSLongitudeRef}` });
+        gpsInfo.push({ label: 'Latitude', value: `${lat.toFixed(6)}° ${exifData.GPSLatitudeRef}`, isText: true });
+        gpsInfo.push({ label: 'Longitude', value: `${lon.toFixed(6)}° ${exifData.GPSLongitudeRef}`, isText: true });
         gpsInfo.push({ 
             label: 'Map Link', 
-            value: `<a href="https://www.google.com/maps?q=${lat},${lon}" target="_blank" style="color: #3b82f6; text-decoration: underline;">View on Map</a>` 
+            mapLink: { lat, lon },
+            isText: false
         });
     }
     
     if (exifData.GPSAltitude) {
         const altRef = exifData.GPSAltitudeRef === 1 ? 'Below' : 'Above';
-        gpsInfo.push({ label: 'Altitude', value: `${exifData.GPSAltitude} m ${altRef} sea level` });
+        gpsInfo.push({ label: 'Altitude', value: `${exifData.GPSAltitude} m ${altRef} sea level`, isText: true });
     }
     
-    if (exifData.GPSDateStamp && exifData.GPSTimeStamp) {
+    if (exifData.GPSDateStamp && exifData.GPSTimeStamp && Array.isArray(exifData.GPSTimeStamp) && exifData.GPSTimeStamp.length >= 3) {
         const time = `${exifData.GPSTimeStamp[0]}:${exifData.GPSTimeStamp[1]}:${exifData.GPSTimeStamp[2]}`;
-        gpsInfo.push({ label: 'GPS Date/Time', value: `${exifData.GPSDateStamp} ${time}` });
+        gpsInfo.push({ label: 'GPS Date/Time', value: `${exifData.GPSDateStamp} ${time}`, isText: true });
     }
 
     if (gpsInfo.length > 0) {
         gpsCard.style.display = 'block';
-        gpsLocation.innerHTML = gpsInfo.map(info => `
-            <div class="info-row">
-                <span class="info-label">${info.label}:</span>
-                <span class="info-value">${info.value}</span>
-            </div>
-        `).join('');
+        gpsLocation.innerHTML = '';
+        gpsInfo.forEach(info => {
+            const row = document.createElement('div');
+            row.className = 'info-row';
+            
+            const label = document.createElement('span');
+            label.className = 'info-label';
+            label.textContent = info.label + ':';
+            
+            const valueSpan = document.createElement('span');
+            valueSpan.className = 'info-value';
+            
+            if (info.mapLink) {
+                // Create link element for map
+                const link = document.createElement('a');
+                link.href = `https://www.google.com/maps?q=${info.mapLink.lat},${info.mapLink.lon}`;
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                link.style.color = '#3b82f6';
+                link.style.textDecoration = 'underline';
+                link.textContent = 'View on Map';
+                valueSpan.appendChild(link);
+            } else {
+                valueSpan.textContent = info.value;
+            }
+            
+            row.appendChild(label);
+            row.appendChild(valueSpan);
+            gpsLocation.appendChild(row);
+        });
     } else {
         gpsCard.style.display = 'none';
     }
