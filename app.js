@@ -23,6 +23,8 @@ const authorCard = document.getElementById('authorCard');
 const exifCard = document.getElementById('exifCard');
 
 const SUPPORTED_FORMATS = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'];
+const RAW_FORMATS = ['image/x-sony-arw', 'image/x-dcraw'];
+const ALL_SUPPORTED_FORMATS = [...SUPPORTED_FORMATS, ...RAW_FORMATS];
 
 uploadArea.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', handleFileSelect);
@@ -64,6 +66,14 @@ function handleFile(file) {
 
     previewSection.style.display = 'block';
 
+    if (isRawFile(file)) {
+        handleRawFile(file);
+    } else {
+        handleStandardImage(file);
+    }
+}
+
+function handleStandardImage(file) {
     const reader = new FileReader();
     reader.onload = function(e) {
         const img = new Image();
@@ -82,42 +92,328 @@ function handleFile(file) {
     reader.readAsDataURL(file);
 }
 
+function handleRawFile(file) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const rawArrayBuffer = e.target.result;
+        const jpegData = extractJpegFromRaw(rawArrayBuffer);
+
+        if (!jpegData) {
+            showError('Could not extract preview from RAW file. The file may be corrupted or unsupported.');
+            return;
+        }
+
+        // Convert to base64 dataURL for display
+        const uint8Array = new Uint8Array(jpegData);
+        let binary = '';
+        for (let i = 0; i < uint8Array.length; i++) {
+            binary += String.fromCharCode(uint8Array[i]);
+        }
+        const base64 = btoa(binary);
+        const dataUrl = 'data:image/jpeg;base64,' + base64;
+
+        const img = new Image();
+        img.onload = function() {
+            imagePreview.src = dataUrl;
+            extractImageData(file, img, dataUrl, true, rawArrayBuffer);
+        };
+        img.onerror = function() {
+            showError('Failed to load RAW preview. The file may be corrupted.');
+        };
+        img.src = dataUrl;
+    };
+    reader.onerror = function() {
+        showError('Failed to read RAW file. Please try again.');
+    };
+    reader.readAsArrayBuffer(file);
+}
+
 function validateFile(file) {
     if (!file) {
         showError('No file selected.');
         return false;
     }
 
-    if (!SUPPORTED_FORMATS.includes(file.type)) {
+    const fileExtension = file.name.toLowerCase().split('.').pop();
+    const isRawByExtension = ['arw', 'raw'].includes(fileExtension);
+
+    if (!ALL_SUPPORTED_FORMATS.includes(file.type) && !isRawByExtension) {
         showError(`Unsupported file format: ${file.type || 'unknown'}. Please select a valid image file.`);
         return false;
     }
 
-    const maxSize = 50 * 1024 * 1024; // 50MB
+    const maxSize = 100 * 1024 * 1024; // 100MB for RAW files
     if (file.size > maxSize) {
-        showError('File size exceeds 50MB limit. Please select a smaller file.');
+        showError('File size exceeds 100MB limit. Please select a smaller file.');
         return false;
     }
 
     return true;
 }
 
-function extractImageData(file, img, dataUrl) {
-    displayValidationStatus(file);
+function isRawFile(file) {
+    const fileExtension = file.name.toLowerCase().split('.').pop();
+    return RAW_FORMATS.includes(file.type) || ['arw', 'raw'].includes(fileExtension);
+}
 
-    displayBasicProperties(file);
+function extractJpegFromRaw(arrayBuffer) {
+    const data = new Uint8Array(arrayBuffer);
+    let jpegStart = -1;
+    let jpegEnd = -1;
+    let largestJpegSize = 0;
+    let bestStart = -1;
+    let bestEnd = -1;
 
-    displayDimensions(img);
+    // Find all JPEG segments and pick the largest one (the main preview)
+    for (let i = 0; i < data.length - 1; i++) {
+        // JPEG start marker: FFD8
+        if (data[i] === 0xFF && data[i + 1] === 0xD8) {
+            jpegStart = i;
+        }
+        // JPEG end marker: FFD9
+        if (data[i] === 0xFF && data[i + 1] === 0xD9 && jpegStart !== -1) {
+            jpegEnd = i + 2;
+            const size = jpegEnd - jpegStart;
+            if (size > largestJpegSize && size > 10000) { // Must be > 10KB to be a real preview
+                largestJpegSize = size;
+                bestStart = jpegStart;
+                bestEnd = jpegEnd;
+            }
+            jpegStart = -1;
+        }
+    }
+
+    if (bestStart !== -1 && bestEnd !== -1) {
+        return arrayBuffer.slice(bestStart, bestEnd);
+    }
+
+    return null;
+}
+
+function extractExifFromRaw(arrayBuffer) {
+    const dataView = new DataView(arrayBuffer);
+    const exifData = {};
+
+    // Check TIFF header
+    const byte0 = dataView.getUint8(0);
+    const byte1 = dataView.getUint8(1);
+
+    let bigEnd;
+    if (byte0 === 0x49 && byte1 === 0x49) {
+        bigEnd = false; // Little endian (Intel)
+    } else if (byte0 === 0x4D && byte1 === 0x4D) {
+        bigEnd = true; // Big endian (Motorola)
+    } else {
+        console.log('Not a valid TIFF file');
+        displayCameraInformation({});
+        displayGPSLocation({});
+        displayAuthorInformation({});
+        displayAdditionalExif({});
+        return;
+    }
+
+    // Check TIFF magic number
+    const magic = dataView.getUint16(2, !bigEnd);
+    if (magic !== 0x002A && magic !== 0x2A00) {
+        console.log('Not a valid TIFF magic number');
+    }
+
+    // Get first IFD offset
+    const ifdOffset = dataView.getUint32(4, !bigEnd);
+
+    // Read IFD0 tags
+    readIFD(dataView, ifdOffset, bigEnd, exifData, arrayBuffer);
+
+    // Display extracted data
+    displayCameraInformation(exifData);
+    displayGPSLocation(exifData);
+    displayAuthorInformation(exifData);
+    displayAdditionalExif(exifData);
+}
+
+function readIFD(dataView, offset, bigEnd, exifData, arrayBuffer) {
+    if (offset >= dataView.byteLength - 2) return;
+
+    const numEntries = dataView.getUint16(offset, !bigEnd);
+    offset += 2;
+
+    const tagNames = {
+        0x010F: 'Make',
+        0x0110: 'Model',
+        0x0112: 'Orientation',
+        0x011A: 'XResolution',
+        0x011B: 'YResolution',
+        0x0128: 'ResolutionUnit',
+        0x0131: 'Software',
+        0x0132: 'DateTime',
+        0x013B: 'Artist',
+        0x8298: 'Copyright',
+        0x8769: 'ExifIFDPointer',
+        0x8825: 'GPSInfoIFDPointer',
+        0x829A: 'ExposureTime',
+        0x829D: 'FNumber',
+        0x8822: 'ExposureProgram',
+        0x8827: 'ISOSpeedRatings',
+        0x9003: 'DateTimeOriginal',
+        0x9004: 'DateTimeDigitized',
+        0x9201: 'ShutterSpeedValue',
+        0x9202: 'ApertureValue',
+        0x9204: 'ExposureBias',
+        0x9205: 'MaxApertureValue',
+        0x9207: 'MeteringMode',
+        0x9209: 'Flash',
+        0x920A: 'FocalLength',
+        0xA402: 'ExposureMode',
+        0xA403: 'WhiteBalance',
+        0xA405: 'FocalLengthIn35mmFilm',
+        0xA406: 'SceneCaptureType',
+        0xA434: 'LensModel',
+        // GPS tags
+        0x0001: 'GPSLatitudeRef',
+        0x0002: 'GPSLatitude',
+        0x0003: 'GPSLongitudeRef',
+        0x0004: 'GPSLongitude',
+        0x0005: 'GPSAltitudeRef',
+        0x0006: 'GPSAltitude',
+    };
+
+    for (let i = 0; i < numEntries; i++) {
+        if (offset + 12 > dataView.byteLength) break;
+
+        const tag = dataView.getUint16(offset, !bigEnd);
+        const type = dataView.getUint16(offset + 2, !bigEnd);
+        const count = dataView.getUint32(offset + 4, !bigEnd);
+        const valueOffset = offset + 8;
+
+        const tagName = tagNames[tag];
+
+        if (tag === 0x8769) { // ExifIFDPointer
+            const exifOffset = dataView.getUint32(valueOffset, !bigEnd);
+            readIFD(dataView, exifOffset, bigEnd, exifData, arrayBuffer);
+        } else if (tag === 0x8825) { // GPSInfoIFDPointer
+            const gpsOffset = dataView.getUint32(valueOffset, !bigEnd);
+            readGPSIFD(dataView, gpsOffset, bigEnd, exifData, arrayBuffer);
+        } else if (tagName) {
+            const value = readTagValue(dataView, type, count, valueOffset, bigEnd, arrayBuffer);
+            if (value !== null) {
+                exifData[tagName] = value;
+            }
+        }
+
+        offset += 12;
+    }
+}
+
+function readGPSIFD(dataView, offset, bigEnd, exifData, arrayBuffer) {
+    if (offset >= dataView.byteLength - 2) return;
+
+    const numEntries = dataView.getUint16(offset, !bigEnd);
+    offset += 2;
+
+    const gpsTagNames = {
+        0x0001: 'GPSLatitudeRef',
+        0x0002: 'GPSLatitude',
+        0x0003: 'GPSLongitudeRef',
+        0x0004: 'GPSLongitude',
+        0x0005: 'GPSAltitudeRef',
+        0x0006: 'GPSAltitude',
+        0x0007: 'GPSTimeStamp',
+        0x001D: 'GPSDateStamp',
+    };
+
+    for (let i = 0; i < numEntries; i++) {
+        if (offset + 12 > dataView.byteLength) break;
+
+        const tag = dataView.getUint16(offset, !bigEnd);
+        const type = dataView.getUint16(offset + 2, !bigEnd);
+        const count = dataView.getUint32(offset + 4, !bigEnd);
+        const valueOffset = offset + 8;
+
+        const tagName = gpsTagNames[tag];
+        if (tagName) {
+            const value = readTagValue(dataView, type, count, valueOffset, bigEnd, arrayBuffer);
+            if (value !== null) {
+                exifData[tagName] = value;
+            }
+        }
+
+        offset += 12;
+    }
+}
+
+function readTagValue(dataView, type, count, valueOffset, bigEnd, arrayBuffer) {
+    const typeSizes = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
+    const size = (typeSizes[type] || 1) * count;
+
+    let offset = valueOffset;
+    if (size > 4) {
+        offset = dataView.getUint32(valueOffset, !bigEnd);
+    }
+
+    if (offset + size > dataView.byteLength) return null;
+
+    try {
+        switch (type) {
+            case 1: // BYTE
+                return count === 1 ? dataView.getUint8(offset) : null;
+            case 2: // ASCII
+                let str = '';
+                for (let i = 0; i < count - 1; i++) {
+                    const char = dataView.getUint8(offset + i);
+                    if (char === 0) break;
+                    str += String.fromCharCode(char);
+                }
+                return str.trim();
+            case 3: // SHORT
+                if (count === 1) {
+                    return size > 4 ? dataView.getUint16(offset, !bigEnd) : dataView.getUint16(valueOffset, !bigEnd);
+                }
+                return null;
+            case 4: // LONG
+                return dataView.getUint32(size > 4 ? offset : valueOffset, !bigEnd);
+            case 5: // RATIONAL
+                if (count === 1) {
+                    const num = dataView.getUint32(offset, !bigEnd);
+                    const den = dataView.getUint32(offset + 4, !bigEnd);
+                    return den !== 0 ? num / den : 0;
+                } else if (count === 3) { // GPS coordinates
+                    const values = [];
+                    for (let i = 0; i < 3; i++) {
+                        const num = dataView.getUint32(offset + i * 8, !bigEnd);
+                        const den = dataView.getUint32(offset + i * 8 + 4, !bigEnd);
+                        values.push(den !== 0 ? num / den : 0);
+                    }
+                    return values;
+                }
+                return null;
+            default:
+                return null;
+        }
+    } catch (e) {
+        return null;
+    }
+}
+
+function extractImageData(file, img, dataUrl, isRaw = false, rawArrayBuffer = null) {
+    displayValidationStatus(file, isRaw);
+
+    displayBasicProperties(file, isRaw);
+
+    displayDimensions(img, isRaw);
 
     displayFileInformation(file);
 
-    extractExifData(img, dataUrl);
+    if (isRaw && rawArrayBuffer) {
+        extractExifFromRaw(rawArrayBuffer);
+    } else {
+        extractExifData(img, dataUrl);
+    }
 
     resultsSection.style.display = 'block';
 }
 
-function displayValidationStatus(file) {
-    const isValid = SUPPORTED_FORMATS.includes(file.type);
+function displayValidationStatus(file, isRaw = false) {
+    const isValid = ALL_SUPPORTED_FORMATS.includes(file.type) || isRaw;
     validationStatus.innerHTML = `
         <div class="info-row">
             <span class="info-label">Status:</span>
@@ -127,6 +423,12 @@ function displayValidationStatus(file) {
                 </span>
             </span>
         </div>
+        ${isRaw ? `
+        <div class="info-row">
+            <span class="info-label">Note:</span>
+            <span class="info-value">RAW file - showing embedded preview</span>
+        </div>
+        ` : ''}
         <div class="info-row">
             <span class="info-label">Validated:</span>
             <span class="info-value">${new Date().toLocaleString()}</span>
@@ -134,8 +436,16 @@ function displayValidationStatus(file) {
     `;
 }
 
-function displayBasicProperties(file) {
-    const format = file.type.split('/')[1].toUpperCase();
+function displayBasicProperties(file, isRaw = false) {
+    let format;
+    if (isRaw) {
+        const ext = file.name.split('.').pop().toUpperCase();
+        format = `${ext} (RAW)`;
+    } else {
+        format = file.type.split('/')[1].toUpperCase();
+    }
+    const mimeType = file.type || 'application/octet-stream';
+
     basicProperties.innerHTML = `
         <div class="info-row">
             <span class="info-label">Format:</span>
@@ -143,7 +453,7 @@ function displayBasicProperties(file) {
         </div>
         <div class="info-row">
             <span class="info-label">MIME Type:</span>
-            <span class="info-value">${file.type}</span>
+            <span class="info-value">${mimeType}</span>
         </div>
         <div class="info-row">
             <span class="info-label">File Name:</span>
@@ -152,11 +462,17 @@ function displayBasicProperties(file) {
     `;
 }
 
-function displayDimensions(img) {
+function displayDimensions(img, isRaw = false) {
     const aspectRatio = (img.width / img.height).toFixed(2);
     const megapixels = ((img.width * img.height) / 1000000).toFixed(2);
-    
+
     imageDimensions.innerHTML = `
+        ${isRaw ? `
+        <div class="info-row">
+            <span class="info-label">Note:</span>
+            <span class="info-value">Preview dimensions (not actual RAW)</span>
+        </div>
+        ` : ''}
         <div class="info-row">
             <span class="info-label">Width:</span>
             <span class="info-value">${img.width} px</span>
