@@ -2,11 +2,11 @@
 
 A lightweight, web-based image inspection tool that validates image files, extracts technical properties (dimensions, format, size), and reads embedded metadata (EXIF, GPS, camera, author, etc.) directly in the browser.
 
-![Meta Image Online](preview/1.jpg)
+![Meta Image Online](preview/1.png)
 
-![Meta Image Online](preview/2.jpg)
+![Meta Image Online](preview/2.png)
 
-![Meta Image Online](preview/3.jpg)
+![Meta Image Online](preview/3.png)
 
 ## Features
 
