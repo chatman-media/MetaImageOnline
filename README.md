@@ -95,14 +95,6 @@ Tested on:
 - Firefox (latest)
 - Safari (latest)
 
-## License
-
-MIT License - See [LICENSE](LICENSE) file for details
-
-## Author
-
-Copyright (c) 2025 Max Base
-
 ## Contributing
 
 Contributions are welcome! Feel free to open issues or submit pull requests.
@@ -110,3 +102,9 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 ## Acknowledgments
 
 - EXIF.js library for EXIF metadata extraction
+
+## License
+
+MIT License - See [LICENSE](LICENSE) file for details
+
+Copyright (c) 2025 Seyyed Ali Mohammadiyeh (Max Base)
